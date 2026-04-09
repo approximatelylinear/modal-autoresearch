@@ -34,8 +34,16 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .gate import GateResult, PromotionGate, SessionBudget
 from .ledger import Ledger
 from .manifest import Manifest
+
+
+class GateRejection(Exception):
+    """Raised when the promotion gate rejects a launch."""
+    def __init__(self, result: GateResult):
+        self.result = result
+        super().__init__(result.reason)
 
 
 @dataclass
@@ -67,12 +75,15 @@ class Launcher:
         self,
         ledger_path: str | Path,
         manifest: Manifest | None = None,
+        budget: SessionBudget | None = None,
     ):
         self.ledger = Ledger(ledger_path)
+        self.budget = budget or SessionBudget()
         # Lazy-import manifest and run_phase to avoid triggering Modal image
         # construction until actually needed. Callers can also pass manifest.
         self._manifest = manifest
         self._run_phase_fn = None
+        self._gate: PromotionGate | None = None
         # In-flight function calls keyed by run_id. These are ephemeral —
         # if the launcher process dies, they're lost (but the Volume ledger
         # inside Modal still has the records).
@@ -92,12 +103,31 @@ class Launcher:
             self._run_phase_fn = _rp
         return self._run_phase_fn
 
+    @property
+    def gate(self) -> PromotionGate:
+        if self._gate is None:
+            self._gate = PromotionGate(self.manifest, self.ledger, self.budget)
+        return self._gate
+
     # ------------------------------------------------------------------
     # Launch
     # ------------------------------------------------------------------
 
-    def launch(self, spec: ExperimentSpec) -> str:
-        """Fire-and-forget: insert running row, spawn Modal function, return run_id."""
+    def check_gate(self, spec: ExperimentSpec) -> GateResult:
+        """Check whether a spec would pass the promotion gate without launching."""
+        return self.gate.check(spec)
+
+    def launch(self, spec: ExperimentSpec, *, skip_gate: bool = False) -> str:
+        """Fire-and-forget: check gate, insert running row, spawn Modal function.
+
+        Raises GateRejection if the promotion gate rejects the spec.
+        Pass skip_gate=True to bypass (e.g. for baseline reruns).
+        """
+        if not skip_gate:
+            result = self.gate.check(spec)
+            if not result.allowed:
+                raise GateRejection(result)
+
         run_id = _new_run_id()
 
         self.ledger.insert_run(
