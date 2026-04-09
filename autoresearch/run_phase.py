@@ -203,6 +203,42 @@ def run_phase(spec: dict) -> dict:
     result["image_hash"] = image_hash
     result["actual_commit_sha"] = actual_sha
 
+    # ---- 5b. Record in ledger ----
+    try:
+        from .ledger import Ledger
+
+        ledger_path = f"/cache/ledger/{PROJECT_NAME}/ledger.db"
+        ledger = Ledger(ledger_path)
+
+        # Insert if not already present (idempotent for retries).
+        existing = ledger.get_run(run_id)
+        if not existing:
+            ledger.insert_run(
+                run_id=run_id,
+                project=PROJECT_NAME,
+                commit_sha=actual_sha,
+                phase=spec.get("phase", ""),
+                config_overrides=spec.get("config_overrides"),
+                parent_run_id=spec.get("parent_run_id", ""),
+                track=spec.get("track", "architecture"),
+                hypothesis=spec.get("hypothesis", ""),
+                image_hash=image_hash,
+            )
+
+        # Read primary metric key from manifest (if available in-container).
+        primary_key = ""
+        try:
+            primary_key = manifest.metrics.primary
+        except Exception:
+            pass
+
+        ledger.complete_run(run_id, result, primary_metric_key=primary_key)
+        ledger.close()
+        print(f"[run_phase] recorded in ledger at {ledger_path}", flush=True)
+    except Exception as e:
+        # Ledger failures must not break the run itself.
+        print(f"[run_phase] WARN: ledger write failed: {e}", flush=True)
+
     # ---- 6. Cleanup worktree ----
     try:
         _git(
