@@ -194,19 +194,18 @@ class Session:
                 f"gate rejections"
             )
 
-        # No improvement in last K experiments
-        if self.no_improvement_limit > 0:
+        # No improvement in last K *session* experiments (skip if no new runs yet).
+        if self.no_improvement_limit > 0 and session_runs >= self.no_improvement_limit:
             recent = self.launcher.query(limit=self.no_improvement_limit)
-            if len(recent) >= self.no_improvement_limit:
-                best_overall = self.launcher.best_runs(n=1)
-                if best_overall:
-                    best_id = best_overall[0]["run_id"]
-                    recent_ids = {r["run_id"] for r in recent}
-                    if best_id not in recent_ids:
-                        return StopCondition.stop(
-                            f"No improvement in last {self.no_improvement_limit} "
-                            f"experiments (best run {best_id} is older)"
-                        )
+            best_overall = self.launcher.best_runs(n=1)
+            if best_overall and recent:
+                best_id = best_overall[0]["run_id"]
+                recent_ids = {r["run_id"] for r in recent}
+                if best_id not in recent_ids:
+                    return StopCondition.stop(
+                        f"No improvement in last {self.no_improvement_limit} "
+                        f"experiments (best run {best_id} is older)"
+                    )
 
         return StopCondition.ok()
 
