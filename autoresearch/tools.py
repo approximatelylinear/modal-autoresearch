@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from .launcher import ExperimentSpec, GateRejection
@@ -63,7 +64,10 @@ class Tools:
             track=track,
         )
         try:
+            print(f"  [modal] Spawning run on Modal (phase={phase}, sha={commit_sha[:7]})...",
+                  flush=True)
             run_id = self.session.launch(spec)
+            print(f"  [modal] Spawned: {run_id}", flush=True)
             return {"run_id": run_id, "status": "launched"}
         except GateRejection as e:
             return {"error": "gate_rejected", "reason": e.result.reason,
@@ -89,7 +93,16 @@ class Tools:
 
     def wait(self, run_id: str) -> dict:
         """Block until a run completes. Returns the final result."""
-        return self.session.launcher.wait(run_id)
+        print(f"  [modal] Waiting for {run_id} to complete...", flush=True)
+        t0 = time.time()
+        result = self.session.launcher.wait(run_id)
+        elapsed = time.time() - t0
+        status = result.get("status", "?")
+        pm = result.get("primary_metric")
+        pm_str = f" primary={pm:.4f}" if pm is not None else ""
+        print(f"  [modal] {run_id} completed: status={status}{pm_str} ({elapsed:.0f}s)",
+              flush=True)
+        return result
 
     def query(
         self,
