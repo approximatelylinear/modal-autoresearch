@@ -129,12 +129,14 @@ class Session:
         # Best runs
         if best:
             lines.append(f"## Top {len(best)} runs ({self.manifest.metrics.primary})")
+            lines.append("(run_id | commit_sha | phase | metric | status | notes)")
             for r in best:
-                metrics = json.loads(r.get("metrics_json") or "{}")
                 pm = r.get("primary_metric")
                 pm_str = f"{pm:.4f}" if pm is not None else "n/a"
                 lines.append(
-                    f"- `{r['run_id']}` phase={r['phase']} "
+                    f"- run_id=`{r['run_id']}` "
+                    f"commit_sha=`{r['commit_sha']}` "
+                    f"phase={r['phase']} "
                     f"{self.manifest.metrics.primary}={pm_str} "
                     f"[{r['status']}] {r.get('observation', '')[:60]}"
                 )
@@ -143,14 +145,16 @@ class Session:
         # Recent runs
         if recent:
             lines.append(f"## Recent {len(recent)} runs")
+            lines.append("(run_id | commit_sha | phase | metric | status)")
             for r in recent:
                 pm = r.get("primary_metric")
                 pm_str = f"{pm:.4f}" if pm is not None else "---"
                 lines.append(
-                    f"- `{r['run_id']}` {r['phase']} "
-                    f"sha={r['commit_sha'][:7]} "
+                    f"- run_id=`{r['run_id']}` "
+                    f"commit_sha=`{r['commit_sha']}` "
+                    f"{r['phase']} "
                     f"{self.manifest.metrics.primary}={pm_str} "
-                    f"[{r['status']}] {r.get('hypothesis', '')[:40]}"
+                    f"[{r['status']}]"
                 )
             lines.append("")
 
@@ -292,26 +296,27 @@ class Session:
             - stats() — Get session statistics.
 
             ## Rules
-            - commit_sha must be a REAL git commit hash from the project repo.
-              Look at existing runs in the ledger (query or context) to find
-              valid commit SHAs. Do NOT invent commit hashes.
+            - commit_sha must be a REAL git commit hash (e.g. "967130b",
+              "7268a7c") — NOT a run_id like "tsv-0092". Look at the
+              commit_sha field of existing runs in context/query output.
             - config_overrides must use keys from the project's config schema
               (call describe() to see valid keys and defaults).
             - Always start with cheap phases (low trust) before expensive ones.
             - Phases with gates_from require a parent_run_id from a passing run.
             - Record lessons when you notice patterns across runs.
             - Use set_status to mark runs as keep/discard/review with reasoning.
-            - Check context() periodically to stay oriented.
             - If a gate rejects your launch, read the reason and adjust.
 
             ## Strategy
             1. Review context to understand what's been tried.
             2. Form a hypothesis about what might improve the metric.
             3. Design a minimal experiment to test it (quick phase first).
-            4. Launch, wait for results, analyze.
-            5. If promising (keep), consider promoting to extensive phase.
-            6. If not (discard), record why and try a different direction.
-            7. Record lessons that apply across experiments.
+            4. Launch, then IMMEDIATELY call wait(run_id) to block until
+               the run completes. Do NOT poll in a loop — use wait().
+            5. Analyze the result. Set status to keep/discard/review.
+            6. If promising (keep), consider promoting to extensive phase.
+            7. If not (discard), record why and try a different direction.
+            8. Record lessons when you notice patterns across runs.
         """)
 
     def close(self) -> None:
