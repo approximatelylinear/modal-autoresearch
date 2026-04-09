@@ -201,20 +201,32 @@ class Launcher:
         del self._inflight[run_id]
         return result
 
-    def wait(self, run_id: str) -> dict:
-        """Block until a run completes. Returns the result dict."""
+    def wait(self, run_id: str, timeout: float = 60 * 60 * 6) -> dict:
+        """Block until a run completes, with timeout. Returns the result dict.
+
+        Args:
+            timeout: Max seconds to wait (default 6 hours). Prevents hanging
+                     forever if the Modal container crashes without returning.
+        """
         fc = self._inflight.get(run_id)
         if fc is None:
             return self.ledger.get_run(run_id) or {}
 
         try:
-            result = fc.get()  # blocks
+            result = fc.get(timeout=timeout)
+        except TimeoutError:
+            result = {
+                "status": "failed",
+                "metrics": {},
+                "cost": {},
+                "notes": f"Timed out after {timeout}s waiting for Modal function",
+            }
         except Exception as e:
             result = {
                 "status": "failed",
                 "metrics": {},
                 "cost": {},
-                "notes": f"Modal function error: {e}",
+                "notes": f"Modal function error: {type(e).__name__}: {e}",
             }
 
         self.ledger.complete_run(
