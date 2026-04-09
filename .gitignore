@@ -3,3 +3,5 @@ __pycache__/
 .venv/
 .modal/
 .DS_Store
+.env
+session_ledger.db
