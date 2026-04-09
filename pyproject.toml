@@ -1,6 +1,7 @@
 [project]
-name = "modal-out"
+name = "modal-autoresearch"
 version = "0.1.0"
+description = "Project-agnostic ML autoresearch on Modal"
 requires-python = ">=3.12"
 dependencies = [
     "modal>=1.4.1",

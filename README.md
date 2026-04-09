@@ -37,20 +37,29 @@ flowchart TB
 ## Quick start
 
 ```bash
-# Install
 git clone https://github.com/approximatelylinear/modal-autoresearch
 cd modal-autoresearch
+
+# One-shot setup: installs deps, authenticates Modal, configures API key
+./setup.sh --project ../your-project
+
+# Or manually:
 uv sync
-
-# Authenticate with Modal
 uv run modal token new
+echo "OPENAI_API_KEY=sk-..." > .env
+```
 
+Then run:
+
+```bash
 # Interactive session (human at the keyboard)
 uv run python run_session.py --import-tsv ../your-project/results.tsv
 
-# LLM-driven session (requires .env with OPENAI_API_KEY)
-echo "OPENAI_API_KEY=sk-..." > .env
+# LLM agent with approval gates
 uv run python run_agent.py --hitl --import-tsv ../your-project/results.tsv
+
+# Fully autonomous
+uv run python run_agent.py --max-turns 30
 ```
 
 ## Architecture
