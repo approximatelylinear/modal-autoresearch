@@ -58,6 +58,9 @@ class Session:
         self.max_consecutive_rejections = max_consecutive_rejections
         self._consecutive_rejections = 0
         self._describe_cache: str | None = None
+        # Snapshot of run count at session start, so budget caps count only
+        # new runs launched this session (not historical imports).
+        self._initial_run_count: int | None = None
 
     @classmethod
     def from_manifest(
@@ -96,9 +99,12 @@ class Session:
         lines.append("")
 
         # Budget
+        total = stats.get("total", 0)
+        session_runs = total - self.initial_run_count
         lines.append("## Budget")
         lines.append(
-            f"- Runs: {stats.get('total', 0)} / {budget.max_runs}"
+            f"- New runs this session: {session_runs} / {budget.max_runs} "
+            f"({total} total incl. history)"
         )
         gpu_used = stats.get("total_gpu_min", 0) or 0
         lines.append(f"- GPU: {gpu_used:.1f} / {budget.max_gpu_min:.1f} min")
@@ -165,11 +171,13 @@ class Session:
         """Check whether the session should stop."""
         stats = self.launcher.stats()
 
-        # Budget exhausted (runs)
+        # Budget exhausted (runs) — count only new runs this session.
         total = stats.get("total", 0)
-        if total >= self.launcher.budget.max_runs:
+        session_runs = total - self.initial_run_count
+        if session_runs >= self.launcher.budget.max_runs:
             return StopCondition.stop(
-                f"Run limit reached: {total} / {self.launcher.budget.max_runs}"
+                f"Run limit reached: {session_runs} new runs "
+                f"(limit {self.launcher.budget.max_runs})"
             )
 
         # Budget exhausted (GPU)
@@ -218,10 +226,26 @@ class Session:
 
     def import_history(self, tsv_path: str | Path) -> int:
         """Import historical runs from a TSV file."""
-        return self.launcher.ledger.import_tsv(
+        n = self.launcher.ledger.import_tsv(
             tsv_path, project=self.manifest.name,
             primary_metric_key=self.manifest.metrics.primary,
         )
+        # Update the baseline so budget caps only count new runs.
+        self._snapshot_initial_count()
+        return n
+
+    def _snapshot_initial_count(self) -> None:
+        """Record how many runs exist right now, so budget checks can
+        distinguish historical imports from new launches."""
+        stats = self.launcher.stats()
+        self._initial_run_count = stats.get("total", 0)
+        self.launcher.set_session_baseline(self._initial_run_count)
+
+    @property
+    def initial_run_count(self) -> int:
+        if self._initial_run_count is None:
+            self._snapshot_initial_count()
+        return self._initial_run_count
 
     # ------------------------------------------------------------------
     # System prompt for LLM agents

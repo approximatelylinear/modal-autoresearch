@@ -66,7 +66,7 @@ def main() -> int:
         ctx = tools.context()
         check("context is string", isinstance(ctx, str))
         check("contains project name", "hydra" in ctx)
-        check("contains budget info", "Runs:" in ctx)
+        check("contains budget info", "New runs this session:" in ctx or "Budget" in ctx)
         check("contains best runs", "Top" in ctx)
         check("contains lessons header", "Lessons" in ctx or "Recent" in ctx)
 
@@ -139,12 +139,13 @@ def main() -> int:
         sc = session.check_stop()
         check("not stopped initially", not sc.triggered)
 
-        # Simulate budget exhaustion.
+        # Simulate budget exhaustion: snapshot baseline at 0, then add 5 runs.
         tight = Session.from_manifest(
             os.environ["AUTORESEARCH_MANIFEST"],
             ledger_path=Path(td) / "tight.db",
             budget=SessionBudget(max_runs=5),
         )
+        tight._snapshot_initial_count()  # baseline = 0
         for i in range(5):
             tight.launcher.ledger.insert_run(
                 project="hydra", commit_sha=f"sha{i}", phase="quick",

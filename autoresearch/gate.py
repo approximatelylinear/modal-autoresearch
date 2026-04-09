@@ -32,7 +32,11 @@ from .manifest import Manifest
 
 @dataclass
 class SessionBudget:
-    """Per-session resource limits. Set by the user/agent at session start."""
+    """Per-session resource limits. Set by the user/agent at session start.
+
+    Run counts are relative to the session start (historical imports don't
+    count). The gate receives `runs_at_session_start` to compute this.
+    """
     max_gpu_min: float = float("inf")
     max_runs: int = 999
     max_high_trust_runs: int = 20     # phases with trust="high"
@@ -61,10 +65,12 @@ class PromotionGate:
         manifest: Manifest,
         ledger: Ledger,
         budget: SessionBudget | None = None,
+        runs_at_session_start: int = 0,
     ):
         self.manifest = manifest
         self.ledger = ledger
         self.budget = budget or SessionBudget()
+        self.runs_at_session_start = runs_at_session_start
 
     def check(self, spec: Any) -> GateResult:
         """Check whether a proposed experiment is allowed to launch.
@@ -165,12 +171,14 @@ class PromotionGate:
     def _check_budget(self, spec: Any) -> GateResult:
         stats = self.ledger.stats(self.manifest.name)
         total_runs = stats.get("total", 0)
+        session_runs = total_runs - self.runs_at_session_start
         total_gpu = stats.get("total_gpu_min", 0) or 0
 
-        # Total runs cap.
-        if total_runs >= self.budget.max_runs:
+        # Session runs cap (excludes historical imports).
+        if session_runs >= self.budget.max_runs:
             return GateResult.reject(
-                f"Run limit reached: {total_runs} / {self.budget.max_runs}."
+                f"Run limit reached: {session_runs} new runs "
+                f"(limit {self.budget.max_runs})."
             )
 
         # Total GPU minutes cap.

@@ -106,8 +106,18 @@ class Launcher:
     @property
     def gate(self) -> PromotionGate:
         if self._gate is None:
-            self._gate = PromotionGate(self.manifest, self.ledger, self.budget)
+            self._gate = PromotionGate(
+                self.manifest, self.ledger, self.budget,
+                runs_at_session_start=self._runs_at_session_start,
+            )
         return self._gate
+
+    _runs_at_session_start: int = 0
+
+    def set_session_baseline(self, count: int) -> None:
+        """Set the run count at session start so budget caps are relative."""
+        self._runs_at_session_start = count
+        self._gate = None  # reset so it picks up the new value
 
     # ------------------------------------------------------------------
     # Launch
