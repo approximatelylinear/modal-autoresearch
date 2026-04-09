@@ -235,12 +235,18 @@ def main() -> int:
         session.close()
         return 0
 
+    # Start the Modal app so run_phase.spawn() works. The app context
+    # stays alive for the whole agent session, allowing multiple
+    # launch/poll cycles without reconnecting.
+    from autoresearch.run_phase import app as modal_app
+
     try:
-        run_agent(
-            client, args.model, session, tools,
-            max_turns=args.max_turns,
-            hitl=args.hitl,
-        )
+        with modal_app.run():
+            run_agent(
+                client, args.model, session, tools,
+                max_turns=args.max_turns,
+                hitl=args.hitl,
+            )
     except KeyboardInterrupt:
         print("\n\nInterrupted by user.")
     finally:

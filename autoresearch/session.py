@@ -292,6 +292,11 @@ class Session:
             - stats() — Get session statistics.
 
             ## Rules
+            - commit_sha must be a REAL git commit hash from the project repo.
+              Look at existing runs in the ledger (query or context) to find
+              valid commit SHAs. Do NOT invent commit hashes.
+            - config_overrides must use keys from the project's config schema
+              (call describe() to see valid keys and defaults).
             - Always start with cheap phases (low trust) before expensive ones.
             - Phases with gates_from require a parent_run_id from a passing run.
             - Record lessons when you notice patterns across runs.
