@@ -68,10 +68,11 @@ class Session:
         manifest_path: str | Path,
         ledger_path: str | Path = "session_ledger.db",
         budget: SessionBudget | None = None,
+        local: bool = False,
         **kwargs: Any,
     ) -> Session:
         manifest = load_manifest(manifest_path)
-        launcher = Launcher(ledger_path, manifest=manifest, budget=budget)
+        launcher = Launcher(ledger_path, manifest=manifest, budget=budget, local=local)
         return cls(manifest, launcher, **kwargs)
 
     # ------------------------------------------------------------------

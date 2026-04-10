@@ -76,18 +76,21 @@ class Launcher:
         ledger_path: str | Path,
         manifest: Manifest | None = None,
         budget: SessionBudget | None = None,
+        local: bool = False,
     ):
         self.ledger = Ledger(ledger_path)
         self.budget = budget or SessionBudget()
+        self.local = local
         # Lazy-import manifest and run_phase to avoid triggering Modal image
         # construction until actually needed. Callers can also pass manifest.
         self._manifest = manifest
         self._run_phase_fn = None
+        self._local_runner = None
         self._gate: PromotionGate | None = None
         # In-flight function calls keyed by run_id. These are ephemeral —
         # if the launcher process dies, they're lost (but the Volume ledger
         # inside Modal still has the records).
-        self._inflight: dict[str, Any] = {}  # run_id -> modal.functions.FunctionCall
+        self._inflight: dict[str, Any] = {}  # run_id -> FunctionCall or LocalFunctionCall
 
     @property
     def manifest(self) -> Manifest:
@@ -102,6 +105,12 @@ class Launcher:
             from .run_phase import run_phase as _rp
             self._run_phase_fn = _rp
         return self._run_phase_fn
+
+    def _get_local_runner(self):
+        if self._local_runner is None:
+            from .local_runner import LocalRunner
+            self._local_runner = LocalRunner(self.manifest)
+        return self._local_runner
 
     @property
     def gate(self) -> PromotionGate:
@@ -151,7 +160,11 @@ class Launcher:
             hypothesis=spec.hypothesis,
         )
 
-        fc = self._run_phase.spawn(spec.to_spec_dict(run_id))
+        spec_dict = spec.to_spec_dict(run_id)
+        if self.local:
+            fc = self._get_local_runner().spawn(spec_dict)
+        else:
+            fc = self._run_phase.spawn(spec_dict)
         self._inflight[run_id] = fc
         return run_id
 

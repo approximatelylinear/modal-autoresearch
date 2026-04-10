@@ -49,6 +49,8 @@ def parse_args() -> argparse.Namespace:
                     help="Max agent turns before stopping")
     p.add_argument("--hitl", action="store_true",
                     help="Human-in-the-loop: pause for approval before each launch")
+    p.add_argument("--local", action="store_true",
+                    help="Run experiments on local GPU instead of Modal")
     p.add_argument("--dry-run", action="store_true",
                     help="Print system prompt + initial context and exit")
     return p.parse_args()
@@ -222,6 +224,7 @@ def main() -> int:
         args.manifest,
         ledger_path=args.ledger,
         budget=budget,
+        local=args.local,
     )
     tools = Tools(session)
 
@@ -240,22 +243,27 @@ def main() -> int:
         session.close()
         return 0
 
-    # Start the Modal app so run_phase.spawn() works. The app context
-    # stays alive for the whole agent session, allowing multiple
-    # launch/poll cycles without reconnecting.
-    print("Starting Modal app...")
-    from autoresearch.run_phase import app as modal_app
+    def _run():
+        run_agent(
+            client, args.model, session, tools,
+            max_turns=args.max_turns,
+            hitl=args.hitl,
+        )
 
     try:
-        with modal_app.run() as app_handle:
-            print(f"Modal app running (app_id={modal_app.app_id})")
-            print(f"View at: https://modal.com/apps/{modal_app.app_id}\n")
-            run_agent(
-                client, args.model, session, tools,
-                max_turns=args.max_turns,
-                hitl=args.hitl,
-            )
-            print("\nStopping Modal app...")
+        if args.local:
+            print(f"Running in local mode (project: {session.manifest.project_root})\n")
+            _run()
+        else:
+            # Start the Modal app so run_phase.spawn() works.
+            print("Starting Modal app...")
+            from autoresearch.run_phase import app as modal_app
+
+            with modal_app.run() as app_handle:
+                print(f"Modal app running (app_id={modal_app.app_id})")
+                print(f"View at: https://modal.com/apps/{modal_app.app_id}\n")
+                _run()
+                print("\nStopping Modal app...")
     except KeyboardInterrupt:
         print("\n\nInterrupted by user.")
     finally:

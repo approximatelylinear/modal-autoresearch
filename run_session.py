@@ -42,6 +42,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-runs", type=int, default=50)
     p.add_argument("--max-gpu-min", type=float, default=600)
     p.add_argument("--max-high-trust", type=int, default=10)
+    p.add_argument("--local", action="store_true",
+                    help="Run experiments on local GPU instead of Modal")
     p.add_argument("--print-system-prompt", action="store_true",
                     help="Print the LLM system prompt and exit")
     return p.parse_args()
@@ -60,6 +62,7 @@ def main() -> int:
         args.manifest,
         ledger_path=args.ledger,
         budget=budget,
+        local=args.local,
     )
     tools = Tools(session)
 
