@@ -134,8 +134,13 @@ def run_agent(
                     print(f"\n  Hypothesis: {fn_args.get('hypothesis', 'n/a')}")
                     print(f"  Phase: {fn_args.get('phase', '?')}")
                     print(f"  Commit: {fn_args.get('commit_sha', '?')}")
-                    approval = input("  Approve launch? [y/N] ").strip().lower()
-                    if approval != "y":
+                    if fn_args.get('config_overrides'):
+                        print(f"  Overrides: {fn_args['config_overrides']}")
+                    approval = input("  Approve? [y/N/stop] ").strip().lower()
+                    if approval in ("stop", "quit", "q"):
+                        print("  Ending session by user request.")
+                        return
+                    elif approval != "y":
                         result = {"error": "human_rejected", "reason": "User declined this launch"}
                         print(f"  -> Rejected by user")
                     else:
@@ -252,11 +257,50 @@ def main() -> int:
             )
             print("\nStopping Modal app...")
     except KeyboardInterrupt:
-        print("\n\nInterrupted. Stopping Modal app...")
+        print("\n\nInterrupted by user.")
     finally:
-        session.close()
+        _graceful_shutdown(session)
 
     return 0
+
+
+def _graceful_shutdown(session: Session) -> None:
+    """Clean up on exit: mark in-flight runs, print summary."""
+    launcher = session.launcher
+
+    # Mark in-flight runs so they don't stay as "running" forever.
+    inflight = list(launcher._inflight.keys())
+    if inflight:
+        print(f"\nCleaning up {len(inflight)} in-flight run(s)...")
+        for run_id in inflight:
+            launcher.ledger.set_status(
+                run_id, "interrupted",
+                "Session ended while run was in-flight"
+            )
+            print(f"  {run_id}: marked interrupted")
+        launcher._inflight.clear()
+
+    # Print final summary.
+    stats = launcher.stats()
+    print(f"\nSession summary:")
+    print(f"  Total runs:  {stats.get('total', 0)}")
+    print(f"  Kept:        {stats.get('kept', 0)}")
+    print(f"  Discarded:   {stats.get('discarded', 0)}")
+    print(f"  Failed:      {stats.get('failed', 0)}")
+    gpu = stats.get('total_gpu_min', 0) or 0
+    print(f"  GPU minutes: {gpu:.1f}")
+    best = stats.get('best_primary')
+    if best is not None:
+        print(f"  Best {session.manifest.metrics.primary}: {best:.4f}")
+
+    lessons = launcher.query_lessons()
+    if lessons:
+        print(f"\n  Lessons ({len(lessons)}):")
+        for l in lessons:
+            print(f"    - {l['text']}")
+
+    print(f"\n  Ledger saved to: {launcher.ledger.db_path}")
+    session.close()
 
 
 if __name__ == "__main__":

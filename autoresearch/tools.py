@@ -93,9 +93,16 @@ class Tools:
 
     def wait(self, run_id: str) -> dict:
         """Block until a run completes. Returns the final result."""
-        print(f"  [modal] Waiting for {run_id} to complete...", flush=True)
+        print(f"  [modal] Waiting for {run_id} to complete "
+              f"(Ctrl+C to stop waiting)...", flush=True)
         t0 = time.time()
-        result = self.session.launcher.wait(run_id)
+        try:
+            result = self.session.launcher.wait(run_id)
+        except KeyboardInterrupt:
+            elapsed = time.time() - t0
+            print(f"\n  [modal] Wait interrupted after {elapsed:.0f}s. "
+                  f"Run {run_id} may still be running on Modal.", flush=True)
+            return self.session.launcher.poll(run_id)
         elapsed = time.time() - t0
         status = result.get("status", "?")
         pm = result.get("primary_metric")
