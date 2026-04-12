@@ -174,6 +174,7 @@ def run_phase(spec: dict) -> dict:
         "PYTHONPATH": f"{wt}:" + os.environ.get("PYTHONPATH", ""),
         "HF_HOME": "/cache/hf",
         "TRANSFORMERS_CACHE": "/cache/hf",
+        "BEIR_DATA_DIR": "/cache/beir",
     }
     cmd = list(CLI_COMMAND) + [
         "run",
