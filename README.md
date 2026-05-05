@@ -58,17 +58,121 @@ uv run python run_session.py --import-tsv ../your-project/results.tsv
 # LLM agent with approval gates
 uv run python run_agent.py --hitl --import-tsv ../your-project/results.tsv
 
-# Fully autonomous
-uv run python run_agent.py --max-turns 30
+# Fully autonomous (agent self-terminates via conclude())
+uv run python run_agent.py --max-gpu-min 300 --max-runs 50
 ```
+
+## From hypothesis to finished result
+
+The framework is a substrate for iteration — it doesn't write code or invent ideas. Here is the typical end-to-end flow when you have an idea you want to test.
+
+### 1. Implement the idea in your project
+
+Modify your project's source, test it locally, commit. The commit SHA is your unit of reproducibility.
+
+```bash
+cd ../your-project
+# Edit relevant files (e.g. add a new conditioning mechanism)
+git commit -am "Add LoRA option to FiLM head"
+git rev-parse HEAD          # → 7f3a91c... (your commit SHA)
+```
+
+The autoresearch CLI (`your_project/autoresearch.py`, the spec→result entrypoint declared in your manifest) is overlaid from the live working tree onto every run. So you don't have to commit CLI-only changes between runs — only experiment code is commit-pinned.
+
+### 2. Launch a cheap-phase run
+
+Always start with the lowest-trust phase. Either drive it yourself at the REPL:
+
+```bash
+uv run python run_session.py
+> launch 7f3a91c quick "LoRA on FiLM reduces overfitting on scifact"
+> wait <run-id>
+```
+
+…or let the LLM agent decide what to try given current ledger state:
+
+```bash
+uv run python run_agent.py --hitl   # you approve each launch
+```
+
+In agent mode, the agent first calls `set_plan(...)` to declare what it's investigating, then drives the loop itself.
+
+### 3. Inspect, decide, curate
+
+When a run finishes, look at the metrics and tag it. The ledger uses this curation downstream:
+
+```
+> set_status <run-id> keep "scifact +0.003, fiqa +0.001 — small but consistent"
+```
+
+Statuses: **keep** (promotable), **discard** (don't promote), **review** (revisit later). Always include a one-line `note` explaining *why* — that note becomes the searchable history.
+
+### 4. Promote, or pivot
+
+If the cheap-phase result is promising, promote it to a higher-trust phase. The promotion gate enforces this — you can't run `extensive` without a passing `quick` parent:
+
+```
+> launch 7f3a91c extensive "validate LoRA at scale" parent_run_id=<run-id>
+```
+
+If it's not promising, pivot. Tweak `config_overrides`, try a sibling commit, or try a different angle entirely.
+
+### 5. Capture lessons
+
+When a pattern shows up across multiple runs, record it as a **lesson** so future sessions don't relitigate the same ground:
+
+```
+> add_lesson "LoRA rank>16 hurts quick-phase scifact (evidence: <a>, <b>, <c>)"
+```
+
+Lessons live in a separate table from runs and are surfaced in every session's context.
+
+### 6. Conclude
+
+A session ends when the agent (or you) has reached an answer. In agent mode this is an explicit tool call:
+
+```python
+conclude(
+    summary=(
+        "Investigated LoRA on FiLM head. Quick: marginal +0.003 avg_ndcg10 "
+        "(runs <a>, <b>); extensive: did not promote (run <c>: -0.001). "
+        "Stopping — the effect is too small to justify the added params."
+    ),
+    lessons=[
+        "LoRA rank>16 hurts quick-phase scifact",
+        "Quick gains < 0.005 avg_ndcg10 typically don't survive extensive",
+    ],
+)
+```
+
+A "finished" result is the combination of: a kept run at a high-trust phase + a recorded conclusion + lessons that survive into future sessions.
+
+### What "iteration" looks like in practice
+
+```mermaid
+flowchart LR
+    idea["Have an idea"] --> code["Edit + commit code"]
+    code --> quick["launch quick"]
+    quick --> decide{"Promising?"}
+    decide -->|yes| extensive["launch extensive\n(gated by quick)"]
+    decide -->|no, but learned| lesson["add_lesson"]
+    decide -->|no| pivot["Try a sibling idea"]
+    extensive --> keep{"Validated?"}
+    keep -->|yes| done["set_status keep\nadd_lesson\nconclude"]
+    keep -->|no| lesson
+    lesson --> idea
+    pivot --> code
+```
+
+The loop closes when you've answered the question your `set_plan` posed — or when continued pushing isn't going to teach you more in this session. The ledger persists across sessions, so tomorrow's session starts with everything today's session learned.
 
 ## Architecture
 
 ```mermaid
 graph TB
     subgraph M5["M5: Agent Layer"]
-        session["Session"]
-        tools["Tools (13 functions)"]
+        session["Session (plan, scratchpad, conclusion)"]
+        tools["Tools (17 functions)"]
         agent["run_agent.py / run_session.py"]
     end
 
@@ -108,7 +212,7 @@ graph TB
 | **M2 — Ledger** | SQLite with runs + lessons tables. Metrics stored as JSON with denormalized primary_metric for ranking. TSV round-trip validated. |
 | **M3 — Launcher** | Fire-and-forget `launch()`, non-blocking `poll()`, parallel sweeps. Local orchestration over Modal functions. |
 | **M4 — Promotion Gate** | Phase gating from manifest, session budget caps, baseline freshness checks. Enforced in the launcher, not trusted to the agent. |
-| **M5 — Agent** | Session context building, LLM system prompt, 13 tool definitions with OpenAI function-calling schemas, interactive REPL, stop conditions. |
+| **M5 — Agent loop** | Agent-driven session: explicit plan, in-session scratchpad, and `conclude()` self-termination. The loop runs until the agent concludes (or a safety stop trips), not until a fixed turn count. 17 tools with OpenAI function-calling schemas, interactive REPL, external-stop wrap-up. |
 
 ## Making a project autoresearchable
 
@@ -192,22 +296,28 @@ run --spec X --output Y  → reads spec JSON, runs experiment, writes result JSO
 
 ## Agent tools
 
-The LLM agent (or human at the REPL) interacts through 13 tools:
+The LLM agent (or human at the REPL) interacts through 17 tools, grouped by purpose:
 
-| Tool | What it does |
-|------|-------------|
-| `launch` | Fire-and-forget experiment on Modal |
-| `poll` / `poll_all` | Non-blocking check for completed runs |
-| `wait` | Block until a run completes |
-| `query` | Filter runs by phase / status / track |
-| `best_runs` | Top N by primary metric |
-| `set_status` | Mark a run as keep / discard / review |
-| `add_lesson` | Record a meta-observation across runs |
-| `cancel` | Kill an in-flight run |
-| `context` | Session state summary for the agent |
-| `describe` | Project's config schema |
-| `stats` | Session statistics |
-| `check_stop` | Whether stop conditions are met |
+| Category | Tool | What it does |
+|----------|------|-------------|
+| **Plan & lifecycle** | `set_plan` | Declare the session's goal, hypotheses, success criteria — surfaced in `context()` every turn |
+|  | `update_plan` | Revise the plan; `reason` is mandatory |
+|  | `note` | Append to the in-session scratchpad (working memory) |
+|  | `conclude` | End the session with a summary + durable lessons |
+| **Experiments** | `launch` | Fire-and-forget experiment on Modal |
+|  | `wait` | Block until a run completes (preferred over polling loops) |
+|  | `poll` / `poll_all` | Non-blocking check for completed runs |
+|  | `cancel` | Kill an in-flight run |
+| **Inspection** | `context` | Full session state: plan, notes, top runs, recent runs, lessons, budget |
+|  | `query` | Filter runs by phase / status / track |
+|  | `best_runs` | Top N by primary metric |
+|  | `describe` | Project's config schema (what overrides are valid) |
+|  | `stats` | Session statistics |
+|  | `check_stop` | Whether external stop conditions are met |
+| **Curation** | `set_status` | Mark a run as keep / discard / review |
+|  | `add_lesson` | Record a durable cross-session insight |
+
+The agent owns pacing and termination. It calls `conclude()` when it's reached a defensible answer, hit a wall, or run out of useful things to try. The loop only force-exits if a safety backstop (`--max-turns`, default 100) trips.
 
 ## Promotion gate
 
@@ -235,41 +345,47 @@ The autoresearch CLI is overlaid from the live working tree onto each worktree a
 
 ## Running modes
 
-**Interactive (HITL):**
+**Interactive REPL (you drive):**
 ```bash
 uv run python run_session.py --import-tsv results.tsv
-# Type tool calls at the REPL
+# Type tool calls at the REPL: launch, wait, set_status, ...
 ```
 
-**LLM with approval gates:**
+**LLM with approval gates (you watch):**
 ```bash
-uv run python run_agent.py --hitl --max-turns 20
-# Agent proposes, you approve/reject each launch
+uv run python run_agent.py --hitl
+# Agent proposes; you approve/reject each launch with [y/N/stop]
 ```
 
-**Fully autonomous:**
+**Fully autonomous (overnight):**
 ```bash
-uv run python run_agent.py --max-turns 50 --max-gpu-min 300
-# Agent runs until budget or stop condition
+uv run python run_agent.py --max-gpu-min 300 --max-runs 50
+# Agent declares a plan, runs experiments, iterates, calls conclude()
+# when done. Exits cleanly on conclude() or when the GPU/run budget
+# is exhausted. --max-turns (default 100) is a safety backstop only.
 ```
+
+Both `run_agent.py` and `run_session.py` accept `--local` to use the local GPU instead of Modal.
 
 ## Project structure
 
 ```
 autoresearch/
-├── manifest.py     Load + validate autoresearch.toml
-├── image.py        Build Modal image from manifest
-├── run_phase.py    Generic Modal Function + worktree mechanics
-├── ledger.py       SQLite runs + lessons
-├── launcher.py     Local orchestration (fire-and-forget launch, poll)
-├── gate.py         Promotion gate (phase gating, budget, baseline)
-├── session.py      Session lifecycle + context building
-└── tools.py        13 agent-callable tools + OpenAI schemas
+├── manifest.py      Load + validate autoresearch.toml
+├── image.py         Build Modal image from manifest
+├── run_phase.py     Generic Modal Function + worktree mechanics
+├── local_runner.py  Local-GPU runner (mirrors Modal's spawn/get interface)
+├── ledger.py        SQLite runs + lessons
+├── launcher.py      Local orchestration (fire-and-forget launch, poll)
+├── gate.py          Promotion gate (phase gating, budget, baseline)
+├── session.py       Session lifecycle, plan/scratchpad/conclusion state
+└── tools.py         17 agent-callable tools + OpenAI schemas
 
-run_session.py      Interactive REPL
-run_agent.py        LLM-driven agent loop (OpenAI function calling)
-smoke_baseline.py   Substrate validation (eval-only)
-replay_baseline.py  Full pipeline validation (training)
+run_session.py       Interactive REPL
+run_agent.py         LLM-driven agent loop, exits on conclude()
+smoke_baseline.py    Substrate validation (eval-only)
+replay_baseline.py   Full pipeline validation (training)
+setup.sh             One-shot install (deps, Modal auth, API key)
 ```
 
 ## Status
