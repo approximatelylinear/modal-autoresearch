@@ -32,6 +32,82 @@ class Tools:
     def __init__(self, session: Session):
         self.session = session
 
+    # ------------------------------------------------------------------
+    # Plan & lifecycle — agent's working memory and self-termination
+    # ------------------------------------------------------------------
+
+    def set_plan(
+        self,
+        goal: str,
+        hypotheses: list[str] | None = None,
+        success_criteria: str = "",
+    ) -> dict:
+        """Declare the investigation plan for this session.
+
+        Call near the start so the goal is visible in context() every
+        turn. Use update_plan() to revise as evidence comes in.
+
+        Args:
+            goal: What you're trying to learn or improve, in one sentence.
+            hypotheses: Working theories you'll test (list of strings).
+            success_criteria: When you'd consider this investigation done.
+        """
+        return self.session.set_plan(goal, hypotheses, success_criteria)
+
+    def update_plan(
+        self,
+        reason: str,
+        goal: str | None = None,
+        hypotheses: list[str] | None = None,
+        success_criteria: str | None = None,
+    ) -> dict:
+        """Revise the plan in light of new evidence.
+
+        Args:
+            reason: Why you're updating — what shifted your thinking.
+                    This is mandatory; it forces explicit articulation.
+            goal, hypotheses, success_criteria: Omit any field to keep
+                its current value.
+        """
+        try:
+            return self.session.update_plan(
+                reason, goal=goal, hypotheses=hypotheses,
+                success_criteria=success_criteria,
+            )
+        except RuntimeError as e:
+            return {"error": str(e)}
+
+    def note(self, text: str) -> dict:
+        """Append to the in-session scratchpad (working memory).
+
+        Use for observations, intermediate conclusions, things to try
+        next. Notes appear in context() output so you stay coherent
+        across many turns. Distinct from add_lesson(), which is for
+        DURABLE cross-session insights.
+        """
+        n = self.session.add_note(text)
+        return {"note_count": n, "text": text}
+
+    def conclude(self, summary: str, lessons: list[str] | None = None) -> dict:
+        """End this session with a summary.
+
+        Call when you've reached a defensible conclusion, hit a wall
+        not worth pushing further, or run out of useful things to try.
+        The agent loop exits cleanly after this call.
+
+        Args:
+            summary: What you set out to do, what you found (with
+                     run_ids), and why you stopped now.
+            lessons: List of durable lessons to record. Each becomes
+                     a row in the cross-session lessons table that
+                     future sessions will see.
+        """
+        return self.session.conclude(summary, lessons)
+
+    # ------------------------------------------------------------------
+    # Experiments
+    # ------------------------------------------------------------------
+
     def launch(
         self,
         commit_sha: str,
@@ -228,6 +304,7 @@ class Tools:
     def tool_names(self) -> list[str]:
         """List available tool names."""
         return [
+            "set_plan", "update_plan", "note", "conclude",
             "launch", "poll", "poll_all", "wait", "query", "best_runs",
             "set_status", "add_lesson", "cancel", "context", "describe",
             "stats", "check_stop",
@@ -239,6 +316,99 @@ class Tools:
 # ------------------------------------------------------------------
 
 TOOL_SCHEMAS = [
+    {
+        "name": "set_plan",
+        "description": (
+            "Declare the investigation plan for this session. Call near "
+            "the start so the goal is visible in context() every turn."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "string",
+                    "description": "What you're trying to learn or improve, in one sentence.",
+                },
+                "hypotheses": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Working theories you'll test.",
+                },
+                "success_criteria": {
+                    "type": "string",
+                    "description": "When you'd consider this investigation done.",
+                },
+            },
+            "required": ["goal"],
+        },
+    },
+    {
+        "name": "update_plan",
+        "description": (
+            "Revise the plan in light of new evidence. Omit any field to "
+            "keep its current value; `reason` is mandatory."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "What shifted your thinking.",
+                },
+                "goal": {"type": "string"},
+                "hypotheses": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "success_criteria": {"type": "string"},
+            },
+            "required": ["reason"],
+        },
+    },
+    {
+        "name": "note",
+        "description": (
+            "Append to the in-session scratchpad. Use for observations, "
+            "intermediate conclusions, things to try next. Notes appear "
+            "in context() output. Distinct from add_lesson()."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "conclude",
+        "description": (
+            "End this session with a summary. Call when you've reached a "
+            "defensible conclusion, hit a wall, or run out of useful "
+            "things to try. The loop exits cleanly after this call."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "What you set out to do, what you found (cite "
+                        "run_ids), and why you stopped now."
+                    ),
+                },
+                "lessons": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Durable lessons to record in the cross-session "
+                        "lessons table."
+                    ),
+                },
+            },
+            "required": ["summary"],
+        },
+    },
     {
         "name": "launch",
         "description": "Launch an experiment on Modal. Returns run_id or gate rejection.",

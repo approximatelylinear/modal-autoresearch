@@ -45,8 +45,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-high-trust", type=int, default=10)
     p.add_argument("--model", default="gpt-4o",
                     help="OpenAI model (gpt-4o, gpt-4o-mini, etc.)")
-    p.add_argument("--max-turns", type=int, default=30,
-                    help="Max agent turns before stopping")
+    p.add_argument("--max-turns", type=int, default=100,
+                    help="Safety cap on turns. The agent normally exits via "
+                         "conclude(); this is a backstop if it gets stuck.")
     p.add_argument("--hitl", action="store_true",
                     help="Human-in-the-loop: pause for approval before each launch")
     p.add_argument("--local", action="store_true",
@@ -70,50 +71,65 @@ def run_agent(
     session: Session,
     tools: Tools,
     *,
-    max_turns: int = 30,
+    max_turns: int = 100,
     hitl: bool = False,
 ) -> None:
-    """Run the agent loop: context → LLM proposes → call tools → repeat."""
+    """Run the agentic loop.
 
+    The agent owns pacing and termination: it decides when to think,
+    when to act, and when to stop (via the `conclude` tool). External
+    stops (budget exhausted, agent stuck) prompt the agent to conclude
+    with a clean record but don't terminate mid-thought. `max_turns` is
+    a backstop for runaway loops only.
+    """
     system = session.system_prompt()
     openai_tools = build_openai_tools()
     messages: list[dict] = [{"role": "system", "content": system}]
 
-    # Seed with initial context.
     initial_context = tools.context()
     messages.append({
         "role": "user",
         "content": (
             "Session started. Here is the current state:\n\n"
             f"{initial_context}\n\n"
-            "Review the context and begin the autoresearch loop. "
-            "Start by checking the best runs and lessons, then propose "
-            "your first experiment."
+            "Begin by reviewing what's been tried, then call set_plan() "
+            "to declare what you're investigating this session. From "
+            "there, drive the loop yourself — think, act, reflect, and "
+            "call conclude() when you've reached your conclusion."
         ),
     })
 
+    external_stop_announced = False
+
     for turn in range(max_turns):
         print(f"\n{'='*60}")
-        print(f"Turn {turn + 1}/{max_turns}")
+        print(f"Turn {turn + 1}/{max_turns}  (max_turns is a safety cap; "
+              f"agent exits via conclude)")
         print(f"{'='*60}")
 
-        # Check stop conditions.
-        sc = session.check_stop()
-        if sc.triggered:
-            print(f"\n*** STOP: {sc.reason} ***")
-            # Tell the agent to wrap up.
-            messages.append({
-                "role": "user",
-                "content": f"Session stop condition triggered: {sc.reason}. "
-                           f"Summarize what was accomplished and any lessons learned.",
-            })
-            response = client.chat.completions.create(
-                model=model, messages=messages,
-            )
-            print(f"\nAgent: {response.choices[0].message.content}")
+        # Agent self-termination — primary exit path.
+        if session.concluded:
+            print("\n*** Agent called conclude() — session ending cleanly ***")
             break
 
-        # Call the LLM.
+        # External safety stop — surface to the agent once so it can
+        # wrap up via conclude(). If it ignores the message and keeps
+        # acting, we'll end up here next turn too.
+        sc = session.check_stop()
+        if sc.triggered and not external_stop_announced:
+            print(f"\n*** External stop signal: {sc.reason} ***")
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"External stop signal: {sc.reason}. "
+                    f"Wrap up by calling conclude(summary, lessons) with a "
+                    f"record of what was learned this session. Do not "
+                    f"launch more experiments."
+                ),
+            })
+            external_stop_announced = True
+
+        # LLM call.
         response = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -123,7 +139,10 @@ def run_agent(
         msg = response.choices[0].message
         messages.append(msg.model_dump())
 
-        # If the LLM wants to call tools.
+        # Print reasoning text alongside actions (the model may emit both).
+        if msg.content:
+            print(f"\nAgent: {msg.content}")
+
         if msg.tool_calls:
             for tc in msg.tool_calls:
                 fn_name = tc.function.name
@@ -158,25 +177,40 @@ def run_agent(
                     "content": json.dumps(result, default=str),
                 })
 
-        # If the LLM just sends text (reasoning / analysis).
-        elif msg.content:
-            print(f"\nAgent: {msg.content}")
+        elif not session.concluded:
+            # Text-only response and no conclusion. Send a minimal nudge
+            # that doesn't push toward a specific action — just tells
+            # the agent it has the floor.
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Your turn. Continue the investigation, or call "
+                    "conclude(summary, lessons) when you're done."
+                ),
+            })
 
-            # After reasoning, nudge to continue the loop.
-            if turn < max_turns - 1:
-                messages.append({
-                    "role": "user",
-                    "content": "Continue the autoresearch loop. "
-                               "Propose the next experiment or call tools as needed.",
-                })
-
-        # Usage tracking.
         if response.usage:
             u = response.usage
-            print(f"  [tokens: {u.prompt_tokens}p + {u.completion_tokens}c = {u.total_tokens}t]")
+            print(f"  [tokens: {u.prompt_tokens}p + {u.completion_tokens}c "
+                  f"= {u.total_tokens}t]")
+    else:
+        # Loop exited via max_turns without conclude — the safety cap fired.
+        print(f"\n*** Safety cap: agent ran {max_turns} turns without "
+              f"calling conclude(). Forcing exit. ***")
 
+    # Surface the conclusion (or lack thereof).
     print("\n" + "=" * 60)
-    print("Session complete.")
+    if session.conclusion:
+        print("CONCLUSION")
+        print("=" * 60)
+        print(session.conclusion["summary"])
+        if session.conclusion.get("lessons"):
+            print(f"\nLessons recorded ({len(session.conclusion['lessons'])}):")
+            for l in session.conclusion["lessons"]:
+                print(f"  - {l}")
+    else:
+        print("Session ended without an explicit conclusion.")
+    print("=" * 60)
     stats = tools.stats()
     print(f"Final stats: {json.dumps(stats, indent=2)}")
 

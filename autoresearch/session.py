@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import textwrap
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,14 @@ class Session:
         # new runs launched this session (not historical imports).
         self._initial_run_count: int | None = None
 
+        # Agentic loop state — plan, scratchpad, conclusion. The agent
+        # owns these via tools (set_plan, note, conclude). All in-memory;
+        # the conclusion is also written to lessons via add_lesson.
+        self.plan: dict | None = None
+        self.scratchpad: list[dict] = []
+        self.concluded: bool = False
+        self.conclusion: dict | None = None
+
     @classmethod
     def from_manifest(
         cls,
@@ -91,6 +100,26 @@ class Session:
         lines.append(f"## Project: {self.manifest.name}")
         lines.append(f"{self.manifest.description}")
         lines.append("")
+
+        # Plan — investigation goal/hypotheses, set by the agent.
+        if self.plan:
+            lines.append("## Current plan")
+            lines.append(f"- Goal: {self.plan['goal']}")
+            if self.plan.get("hypotheses"):
+                lines.append("- Working hypotheses:")
+                for h in self.plan["hypotheses"]:
+                    lines.append(f"  - {h}")
+            if self.plan.get("success_criteria"):
+                lines.append(f"- Success criteria: {self.plan['success_criteria']}")
+            n_rev = len(self.plan.get("revisions", []))
+            if n_rev:
+                last = self.plan["revisions"][-1]
+                lines.append(f"- Plan revised {n_rev}x; latest reason: {last['reason']}")
+            lines.append("")
+        else:
+            lines.append("## Current plan")
+            lines.append("_No plan set. Call set_plan(goal, hypotheses, success_criteria)._")
+            lines.append("")
 
         # Phases
         lines.append("## Phases")
@@ -166,6 +195,18 @@ class Session:
                 lines.append(f"- {l['text']}")
             lines.append("")
 
+        # In-session scratchpad — agent's working memory for this session.
+        if self.scratchpad:
+            recent_notes = self.scratchpad[-10:]
+            lines.append(
+                f"## Session notes ({len(self.scratchpad)} total"
+                + (f", showing last {len(recent_notes)}" if len(self.scratchpad) > len(recent_notes) else "")
+                + ")"
+            )
+            for n in recent_notes:
+                lines.append(f"- {n['text']}")
+            lines.append("")
+
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -213,6 +254,67 @@ class Session:
                     )
 
         return StopCondition.ok()
+
+    # ------------------------------------------------------------------
+    # Agentic loop state — plan / scratchpad / conclusion
+    # ------------------------------------------------------------------
+
+    def set_plan(
+        self,
+        goal: str,
+        hypotheses: list[str] | None = None,
+        success_criteria: str = "",
+    ) -> dict:
+        self.plan = {
+            "goal": goal,
+            "hypotheses": list(hypotheses or []),
+            "success_criteria": success_criteria,
+            "set_at": time.time(),
+            "revisions": [],
+        }
+        return dict(self.plan)
+
+    def update_plan(
+        self,
+        reason: str,
+        goal: str | None = None,
+        hypotheses: list[str] | None = None,
+        success_criteria: str | None = None,
+    ) -> dict:
+        if self.plan is None:
+            raise RuntimeError("No plan set; call set_plan first")
+        self.plan["revisions"].append({
+            "at": time.time(),
+            "reason": reason,
+            "previous_goal": self.plan["goal"],
+            "previous_hypotheses": list(self.plan["hypotheses"]),
+            "previous_success_criteria": self.plan["success_criteria"],
+        })
+        if goal is not None:
+            self.plan["goal"] = goal
+        if hypotheses is not None:
+            self.plan["hypotheses"] = list(hypotheses)
+        if success_criteria is not None:
+            self.plan["success_criteria"] = success_criteria
+        return dict(self.plan)
+
+    def add_note(self, text: str) -> int:
+        self.scratchpad.append({"at": time.time(), "text": text})
+        return len(self.scratchpad)
+
+    def conclude(self, summary: str, lessons: list[str] | None = None) -> dict:
+        lesson_ids: list[str] = []
+        for lesson_text in (lessons or []):
+            lid = self.launcher.add_lesson(lesson_text)
+            lesson_ids.append(lid)
+        self.conclusion = {
+            "summary": summary,
+            "lessons": list(lessons or []),
+            "lesson_ids": lesson_ids,
+            "at": time.time(),
+        }
+        self.concluded = True
+        return self.conclusion
 
     # ------------------------------------------------------------------
     # Convenience wrappers (track rejection streak)
@@ -273,7 +375,41 @@ class Session:
             ## Your goal
             Improve the primary metric ({self.manifest.metrics.primary},
             {"higher" if self.manifest.metrics.higher_is_better else "lower"} is better)
-            by proposing experiments, analyzing results, and iterating.
+            by proposing experiments, analyzing results, and iterating —
+            until you reach a defensible conclusion or run out of useful
+            things to try in this session.
+
+            ## How this loop works
+            You drive the session. Each turn you may:
+              - Call tools to act (launch, wait, query, set_status, …)
+              - Emit reasoning text to think through what to do next
+              - Call `conclude(summary, lessons)` to END the session
+
+            The loop keeps running until you call `conclude` or an
+            external safety stop trips (budget exhausted, agent stuck,
+            etc.). There is NO fixed turn budget driving you forward —
+            pace yourself. Reasoning between actions is encouraged;
+            there is no penalty for thinking before acting.
+
+            Don't drag the session out, but don't bail prematurely
+            either. When the evidence is clear or you've hit a wall,
+            conclude with a summary that captures what was learned.
+
+            ## Plan and notes (your working memory)
+            - `set_plan(goal, hypotheses, success_criteria)` — declare
+              what you're investigating this session. Call this near
+              the start so future-you (and the human) can see the
+              intent. Surfaced in context() output every turn.
+            - `update_plan(reason, ...)` — revise when evidence shifts
+              your strategy. The `reason` field is mandatory — articulate
+              what changed your mind.
+            - `note(text)` — append to the in-session scratchpad. Use
+              for observations, intermediate conclusions, things to try
+              next. Notes appear in context() so you stay coherent
+              across many turns.
+            - `add_lesson(text, evidence)` — for DURABLE insights that
+              should survive past this session (recorded in the lessons
+              table that future sessions will read).
 
             ## Phases
             {phases_desc}
@@ -282,42 +418,59 @@ class Session:
             {metrics_desc}
 
             ## Available tools
-            - launch(commit_sha, phase, config_overrides, hypothesis, parent_run_id, track)
-              Launch an experiment. Returns run_id. Fire-and-forget.
-            - poll(run_id) — Check if a run is done. Returns status + metrics if complete.
-            - poll_all() — Drain all completed runs.
-            - wait(run_id) — Block until a run completes.
-            - query(phase, status, limit) — Query runs from the ledger.
-            - best_runs(phase, n) — Top N runs by primary metric.
-            - set_status(run_id, status, note) — Mark a run as keep/discard/review.
-            - add_lesson(text, evidence) — Record a lesson learned.
-            - cancel(run_id) — Cancel an in-flight run.
-            - context() — Get the current session context summary.
-            - describe() — Get the project's config schema (what overrides are valid).
-            - stats() — Get session statistics.
+
+            Plan & lifecycle:
+              - set_plan(goal, hypotheses, success_criteria)
+              - update_plan(reason, goal?, hypotheses?, success_criteria?)
+              - note(text)
+              - conclude(summary, lessons)
+
+            Experiments:
+              - launch(commit_sha, phase, config_overrides, hypothesis,
+                       parent_run_id, track) — fire-and-forget; returns run_id
+              - wait(run_id) — block until completion (preferred)
+              - poll(run_id) — non-blocking status check
+              - poll_all() — drain all completed in-flight runs
+              - cancel(run_id) — kill an in-flight run
+
+            Inspection:
+              - context() — full session state (plan, notes, recent runs, lessons)
+              - query(phase, status, track, limit)
+              - best_runs(phase, n)
+              - describe() — project's config schema
+              - stats()
+
+            Curation:
+              - set_status(run_id, status, note) — keep / discard / review
+              - add_lesson(text, evidence) — durable cross-session insight
 
             ## Rules
             - commit_sha must be a REAL git commit hash (e.g. "967130b",
               "7268a7c") — NOT a run_id like "tsv-0092". Look at the
               commit_sha field of existing runs in context/query output.
-            - config_overrides must use keys from the project's config schema
-              (call describe() to see valid keys and defaults).
-            - Always start with cheap phases (low trust) before expensive ones.
-            - Phases with gates_from require a parent_run_id from a passing run.
-            - Record lessons when you notice patterns across runs.
-            - Use set_status to mark runs as keep/discard/review with reasoning.
+            - config_overrides must use keys from the project's config
+              schema (call describe() to see valid keys and defaults).
+            - Always start with cheap phases (low trust) before
+              expensive ones.
+            - Phases with gates_from require a parent_run_id from a
+              passing run.
+            - After launch(), call wait(run_id). Don't poll in a loop.
             - If a gate rejects your launch, read the reason and adjust.
 
-            ## Strategy
-            1. Review context to understand what's been tried.
-            2. Form a hypothesis about what might improve the metric.
-            3. Design a minimal experiment to test it (quick phase first).
-            4. Launch, then IMMEDIATELY call wait(run_id) to block until
-               the run completes. Do NOT poll in a loop — use wait().
-            5. Analyze the result. Set status to keep/discard/review.
-            6. If promising (keep), consider promoting to extensive phase.
-            7. If not (discard), record why and try a different direction.
-            8. Record lessons when you notice patterns across runs.
+            ## When to conclude
+            Good moments:
+              - You've answered the question your plan posed.
+              - You've seen enough trend that more runs won't change
+                your mind.
+              - You've hit a wall and a different angle (or different
+                session) is needed.
+              - External stop fired — wrap up with a clean record.
+
+            A good `conclude(summary, lessons)` includes:
+              - What you set out to do (echo your plan).
+              - What you actually found (cite run_ids).
+              - Why you stopped now.
+              - Lessons that should outlive this session.
         """)
 
     def close(self) -> None:
